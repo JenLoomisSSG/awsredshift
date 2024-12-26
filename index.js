@@ -3,9 +3,10 @@ var pg = require('pg');
 var semver = require('semver');
 var Base = require('db-migrate-base');
 var Promise = require('bluebird');
+var fs = require('fs');
 
 var PgDriver = Base.extend({
-  init: function(connection, schema, intern) {
+  init: function (connection, schema, intern) {
     this.log = intern.mod.log;
     this.type = intern.mod.type;
     this._escapeString = "'";
@@ -15,22 +16,22 @@ var PgDriver = Base.extend({
     this.schema = schema || 'public';
   },
 
-  startMigration: function(cb) {
+  startMigration: function (cb) {
     if (!this.internals.notransactions) {
       return this.runSql('BEGIN;').nodeify(cb);
     } else return Promise.resolve().nodeify(cb);
   },
 
-  endMigration: function(cb) {
+  endMigration: function (cb) {
     if (!this.internals.notransactions) {
       return this.runSql('COMMIT;').nodeify(cb);
     } else return Promise.resolve(null).nodeify(cb);
   },
 
-  createColumnDef: function(name, spec, options, tableName) {
+  createColumnDef: function (name, spec, options, tableName) {
     // add support for datatype timetz, timestamptz
     // https://www.postgresql.org/docs/9.5/static/datatype.html
-    spec.type = spec.type.replace(/^(time|timestamp)tz$/, function($, type) {
+    spec.type = spec.type.replace(/^(time|timestamp)tz$/, function ($, type) {
       spec.timezone = true;
       return type;
     });
@@ -54,7 +55,7 @@ var PgDriver = Base.extend({
     };
   },
 
-  _translateSpecialDefaultValues: function(
+  _translateSpecialDefaultValues: function (
     spec,
     options,
     tableName,
@@ -70,7 +71,7 @@ var PgDriver = Base.extend({
     }
   },
 
-  mapDataType: function(str) {
+  mapDataType: function (str) {
     switch (str) {
       case 'json':
       case 'jsonb':
@@ -85,10 +86,15 @@ var PgDriver = Base.extend({
     return this._super(str);
   },
 
-  createDatabase: function(dbName, options, callback) {
+  createDatabase: function (dbName, options, callback) {
     var spec = '';
 
-    if (typeof options === 'function') callback = options;
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
+    } else if (!options) {
+      options = {};
+    }
 
     this.runSql(
       util.format('CREATE DATABASE %s %s', this.escapeDDL(dbName), spec),
@@ -96,11 +102,11 @@ var PgDriver = Base.extend({
     );
   },
 
-  dropDatabase: function(dbName, options, callback) {
+  dropDatabase: function (dbName, options, callback) {
     var ifExists = '';
 
     if (typeof options === 'function') callback = options;
-    else {
+    else if (options) {
       ifExists = options.ifExists === true ? 'IF EXISTS' : '';
     }
 
@@ -110,7 +116,7 @@ var PgDriver = Base.extend({
     );
   },
 
-  createSequence: function(sqName, options, callback) {
+  createSequence: function (sqName, options, callback) {
     var spec = '';
     var temp = '';
 
@@ -125,23 +131,29 @@ var PgDriver = Base.extend({
     );
   },
 
-  switchDatabase: function(options, callback) {
+  switchDatabase: function (options, callback) {
     if (typeof options === 'object') {
       if (typeof options.database === 'string') {
         this.log.info(
           'Ignore database option, not available with postgres. Use schema instead!'
         );
         this.runSql(
-          util.format('SET search_path TO `%s`', options.database),
+          util.format('SET search_path TO %s', options.database),
+          callback
+        );
+      } else if (typeof options.schema === 'string') {
+        this.schema = options.schema;
+        this.runSql(
+          util.format('SET search_path TO %s', options.schema),
           callback
         );
       }
     } else if (typeof options === 'string') {
-      this.runSql(util.format('SET search_path TO `%s`', options), callback);
+      this.runSql(util.format('SET search_path TO %s', options), callback);
     } else callback(null);
   },
 
-  dropSequence: function(dbName, options, callback) {
+  dropSequence: function (dbName, options, callback) {
     var ifExists = '';
     var rule = '';
 
@@ -159,7 +171,7 @@ var PgDriver = Base.extend({
     );
   },
 
-  createMigrationsTable: function(callback) {
+  createMigrationsTable: function (callback) {
     var options = {
       columns: {
         id: {
@@ -174,9 +186,9 @@ var PgDriver = Base.extend({
       ifNotExists: false
     };
 
-    return this.all('select version() server_version')
+    return this.all('select version() as server_version')
       .then(
-        function(result) {
+        function (result) {
           if (result && result.length > 0 && result[0].server_version) {
             var version = result[0].server_version;
             // handle versions like “10.2 (Ubuntu 10.2)”
@@ -185,21 +197,46 @@ var PgDriver = Base.extend({
             if (version.split('.').length !== 3) {
               version += '.0';
             }
+            console.log(`Version: ${version}`);
             options.ifNotExists = semver.gte(version, '9.1.0');
-            // Get the current search path so we can change the current
-            // schema if necessary
-            return this.all('SHOW search_path');
           }
+
+          // Get the current search path so we can change the current schema
+          // if necessary
+          return this.all('SHOW search_path');
+        }.bind(this)
+      )
+      .catch(
+        // not all DBs support server_version_num, fall back to server_version
+        function () {
+          return this.all('show server_version').then(
+            function (result) {
+              if (result && result.length > 0 && result[0].server_version) {
+                var version = result[0].server_version;
+                // handle versions like “10.2 (Ubuntu 10.2)”
+                version = version.split(' ')[0];
+                // handle missing patch numbers
+                if (version.split('.').length !== 3) {
+                  version += '.0';
+                }
+                options.ifNotExists = semver.gte(version, '9.1.0');
+                // Get the current search path so we can change the current
+                // schema if necessary
+                return this.all('SHOW search_path');
+              }
+            }.bind(this)
+          );
         }.bind(this)
       )
       .then(
-        function(result) {
+        function (result) {
           var searchPath;
           var searchPathes = result[0].search_path.split(',');
 
           for (var i = 0; i < searchPathes.length; ++i) {
+            searchPathes[i] = searchPathes[i].trim();
             if (searchPathes[i].indexOf('"') !== 0) {
-              searchPathes[i] = '"' + searchPathes[i].trim() + '"';
+              searchPathes[i] = '"' + searchPathes[i] + '"';
             }
           }
 
@@ -218,7 +255,7 @@ var PgDriver = Base.extend({
         }.bind(this)
       )
       .then(
-        function() {
+        function () {
           return this.all(
             "SELECT table_name FROM information_schema.tables WHERE table_name = '" +
               this.internals.migrationTable +
@@ -228,7 +265,7 @@ var PgDriver = Base.extend({
         }.bind(this)
       )
       .then(
-        function(result) {
+        function (result) {
           if (result && result.length < 1) {
             return this.createTable(this.internals.migrationTable, options);
           } else {
@@ -239,7 +276,7 @@ var PgDriver = Base.extend({
       .nodeify(callback);
   },
 
-  createSeedsTable: function(callback) {
+  createSeedsTable: function (callback) {
     var options = {
       columns: {
         id: {
@@ -256,7 +293,7 @@ var PgDriver = Base.extend({
 
     return this.all('select version() as version')
       .then(
-        function(result) {
+        function (result) {
           if (result && result.length > 0 && result[0].version) {
             var version = result[0].version;
             var match = version.match(/\d+\.\d+\.\d+/);
@@ -271,7 +308,7 @@ var PgDriver = Base.extend({
         }.bind(this)
       )
       .then(
-        function(result) {
+        function (result) {
           var searchPath;
 
           // if the user specified a different schema, prepend it to the
@@ -287,7 +324,7 @@ var PgDriver = Base.extend({
         }.bind(this)
       )
       .then(
-        function() {
+        function () {
           return this.all(
             "SELECT table_name FROM information_schema.tables WHERE table_name = '" +
               this.internals.seedTable +
@@ -297,7 +334,7 @@ var PgDriver = Base.extend({
         }.bind(this)
       )
       .then(
-        function(result) {
+        function (result) {
           if (result && result.length < 1) {
             return this.createTable(this.internals.seedTable, options);
           } else {
@@ -308,7 +345,7 @@ var PgDriver = Base.extend({
       .nodeify(callback);
   },
 
-  createColumnConstraint: function(spec, options, tableName, columnName) {
+  createColumnConstraint: function (spec, options, tableName, columnName) {
     var constraint = [];
     var callbacks = [];
     var cb;
@@ -353,7 +390,7 @@ var PgDriver = Base.extend({
     if (spec.comment) {
       // TODO: create a new function addComment is not callable from here
       callbacks.push(
-        function(tableName, columnName, comment, callback) {
+        function (tableName, columnName, comment, callback) {
           var sql = util.format(
             "COMMENT on COLUMN %s.%s IS '%s'",
             tableName,
@@ -372,7 +409,13 @@ var PgDriver = Base.extend({
     };
   },
 
-  renameTable: function(tableName, newTableName, callback) {
+  renameTable: function (tableName, newTableName, callback) {
+    let options = {};
+    if (typeof callback === 'object') {
+      options = callback;
+      callback = null;
+    }
+
     var sql = util.format(
       'ALTER TABLE "%s" RENAME TO "%s"',
       tableName,
@@ -381,7 +424,21 @@ var PgDriver = Base.extend({
     return this.runSql(sql).nodeify(callback);
   },
 
-  removeColumn: function(tableName, columnName, callback) {
+  removeColumn: function (tableName, columnName, callback) {
+    let options = {};
+    if (typeof callback === 'object') {
+      options = callback;
+      callback = null;
+    }
+
+    if (options.columnStrategy === 'delay') {
+      return this.renameColumn(
+        tableName,
+        columnName,
+        options.passthrough.column
+      );
+    }
+
     var sql = util.format(
       'ALTER TABLE "%s" DROP COLUMN "%s"',
       tableName,
@@ -391,7 +448,13 @@ var PgDriver = Base.extend({
     return this.runSql(sql).nodeify(callback);
   },
 
-  renameColumn: function(tableName, oldColumnName, newColumnName, callback) {
+  renameColumn: function (tableName, oldColumnName, newColumnName, callback) {
+    let options = {};
+    if (typeof callback === 'object') {
+      options = callback;
+      callback = null;
+    }
+
     var sql = util.format(
       'ALTER TABLE "%s" RENAME COLUMN "%s" TO "%s"',
       tableName,
@@ -401,10 +464,16 @@ var PgDriver = Base.extend({
     return this.runSql(sql).nodeify(callback);
   },
 
-  changeColumn: function(tableName, columnName, columnSpec, callback) {
-    return setNotNull.call(this);
+  changeColumn: function (tableName, columnName, columnSpec, callback) {
+    let options = {};
+    if (typeof callback === 'object') {
+      options = callback;
+      callback = null;
+    }
 
-    function setNotNull() {
+    return setNotNull.call(this).nodeify(callback);
+
+    function setNotNull () {
       var setOrDrop = columnSpec.notNull === true ? 'SET' : 'DROP';
       var sql = util.format(
         'ALTER TABLE "%s" ALTER COLUMN "%s" %s NOT NULL',
@@ -413,14 +482,10 @@ var PgDriver = Base.extend({
         setOrDrop
       );
 
-      return this.runSql(sql).nodeify(setUnique.bind(this));
+      return this.runSql(sql).then(setUnique.bind(this));
     }
 
-    function setUnique(err) {
-      if (err) {
-        return Promise.reject(err);
-      }
-
+    function setUnique () {
       var sql;
       var constraintName = tableName + '_' + columnName + '_key';
 
@@ -431,24 +496,20 @@ var PgDriver = Base.extend({
           constraintName,
           columnName
         );
-        return this.runSql(sql).nodeify(setDefaultValue.bind(this));
+        return this.runSql(sql).then(setDefaultValue.bind(this));
       } else if (columnSpec.unique === false) {
         sql = util.format(
           'ALTER TABLE "%s" DROP CONSTRAINT "%s"',
           tableName,
           constraintName
         );
-        return this.runSql(sql).nodeify(setDefaultValue.bind(this));
+        return this.runSql(sql).then(setDefaultValue.bind(this));
       } else {
         return setDefaultValue.call(this);
       }
     }
 
-    function setDefaultValue(err) {
-      if (err) {
-        return Promise.reject(err).nodeify(callback);
-      }
-
+    function setDefaultValue () {
       var sql;
 
       if (columnSpec.defaultValue !== undefined) {
@@ -471,21 +532,19 @@ var PgDriver = Base.extend({
           columnName
         );
       }
-      return this.runSql(sql)
-        .then(setType.bind(this))
-        .nodeify(callback);
+      return this.runSql(sql).then(setType.bind(this));
     }
 
-    function setType() {
+    function setType () {
       if (columnSpec.type !== undefined) {
         var using =
           columnSpec.using !== undefined
             ? columnSpec.using
             : util.format(
-                'USING "%s"::%s',
-                columnName,
-                this.mapDataType(columnSpec.type)
-              );
+              'USING "%s"::%s',
+              columnName,
+              this.mapDataType(columnSpec.type)
+            );
         var len = columnSpec.length
           ? util.format('(%s)', columnSpec.length)
           : '';
@@ -502,7 +561,7 @@ var PgDriver = Base.extend({
     }
   },
 
-  addForeignKey: function(
+  addForeignKey: function (
     tableName,
     referencedTableName,
     keyName,
@@ -515,7 +574,7 @@ var PgDriver = Base.extend({
       rules = {};
     }
     var columns = Object.keys(fieldMapping);
-    var referencedColumns = columns.map(function(key) {
+    var referencedColumns = columns.map(function (key) {
       return '"' + fieldMapping[key] + '"';
     });
     var sql = util.format(
@@ -525,13 +584,19 @@ var PgDriver = Base.extend({
       this.quoteDDLArr(columns).join(', '),
       referencedTableName,
       referencedColumns.join(', '),
-      rules.onDelete || 'NO ACTION',
-      rules.onUpdate || 'NO ACTION'
+      (rules && rules.onDelete) || 'NO ACTION',
+      (rules && rules.onUpdate) || 'NO ACTION'
     );
     return this.runSql(sql).nodeify(callback);
   },
 
-  removeForeignKey: function(tableName, keyName, callback) {
+  removeForeignKey: function (tableName, keyName, callback) {
+    let options = {};
+    if (typeof callback === 'object') {
+      options = callback;
+      callback = null;
+    }
+
     var sql = util.format(
       'ALTER TABLE "%s" DROP CONSTRAINT "%s"',
       tableName,
@@ -540,21 +605,21 @@ var PgDriver = Base.extend({
     return this.runSql(sql).nodeify(callback);
   },
 
-  insert: function() {
+  insert: function () {
     var index = 1;
 
     if (arguments.length > 3) {
       index = 2;
     }
 
-    arguments[index] = arguments[index].map(function(value) {
+    arguments[index] = arguments[index].map(function (value) {
       return typeof value === 'string' ? value : JSON.stringify(value);
     });
 
     return this._super.apply(this, arguments);
   },
 
-  runSql: function() {
+  runSql: function () {
     var callback;
     var minLength = 1;
     var params;
@@ -583,8 +648,8 @@ var PgDriver = Base.extend({
     }
 
     return new Promise(
-      function(resolve, reject) {
-        var prCB = function(err, data) {
+      function (resolve, reject) {
+        var prCB = function (err, data) {
           return err ? reject(err) : resolve(data);
         };
 
@@ -596,17 +661,66 @@ var PgDriver = Base.extend({
     ).nodeify(callback);
   },
 
-  _getKV: function(table, key) {
+  // we case run_on to string, for dbs that may have bigger precision
+  // than miliseconds
+  _getKV: function (table, key) {
     var sql =
-      'SELECT * FROM ' +
+      `SELECT ${this.escapeDDL('key')},
+        ${this.escapeDDL('value')},
+        ${this.escapeDDL('run_on')}::${this.mapDataType(this.type.STRING)}
+        FROM ` +
       this._escapeDDL +
       table +
       this._escapeDDL +
-      ' WHERE key = $1';
+      ` WHERE ${this.escapeDDL('key')} = $1`;
     return this.allAsync(sql, [key]).then(([row]) => row);
   },
 
-  all: function(...params) {
+  /**
+   * We use the database clock if available, to set run_on.
+   */
+  _updateKV: function (table, key, value) {
+    return this.runSql(
+      `UPDATE ${this.escapeDDL(table)} SET ${this.escapeDDL('value')} = ?,
+      ${this.escapeDDL('run_on')} = NOW()
+      WHERE ${this.escapeDDL('key')} = ?`,
+      [value, key]
+    );
+  },
+
+  _updateKVC: function (table, key, value, c, v) {
+    return this.runSql(
+      `UPDATE ${this.escapeDDL(table)} SET ${this.escapeDDL('value')} = ?,
+      ${this.escapeDDL('run_on')} = NOW()
+      WHERE ${this.escapeDDL('key')} = ? AND ${this.escapeDDL(c)} = ?`,
+      [value, key, v]
+    );
+  },
+
+  _insertEntry: function (table, name) {
+    return this.runSql(
+      'INSERT INTO ' +
+        this.escapeDDL(table) +
+        ' (' +
+        this.escapeDDL('name') +
+        ', ' +
+        this.escapeDDL('run_on') +
+        ') VALUES (?, NOW())',
+      [name]
+    );
+  },
+
+  _insertKV: function (table, key, value) {
+    return this.runSql(
+      `INSERT INTO ${this.escapeDDL(table)}
+        (${this.escapeDDL('key')}, ${this.escapeDDL('value')}, ${this.escapeDDL(
+        'run_on'
+      )}) VALUES (?, ?, NOW())`,
+      [key, value]
+    );
+  },
+
+  all: function (...params) {
     let cb;
     if (typeof params[params.length - 1] === 'function') {
       cb = params.pop();
@@ -615,11 +729,11 @@ var PgDriver = Base.extend({
     this.log.sql.apply(null, params);
 
     return new Promise(
-      function(resolve, reject) {
-        var prCB = function(err, data) {
+      function (resolve, reject) {
+        var prCB = function (err, data) {
           return err ? reject(err) : resolve(data);
         };
-        params.push(function(err, result) {
+        params.push(function (err, result) {
           prCB(err, result ? result.rows : result);
         });
 
@@ -628,25 +742,40 @@ var PgDriver = Base.extend({
     ).nodeify(cb);
   },
 
-  close: function(callback) {
+  close: function (callback) {
     this.connection.end();
     if (typeof callback === 'function') {
       return Promise.resolve().nodeify(callback);
     } else return Promise.resolve();
+  },
+
+  _meta: {
+    supports: {
+      // all legacy callbacks can be option objects
+      optionParam: true,
+      // support for column strategies for example on dropping not
+      // null columns
+      columnStrategies: true
+    }
   }
 });
 
 Promise.promisifyAll(PgDriver);
 
-exports.connect = function(config, intern, callback) {
+exports.connect = function (config, intern, callback) {
   if (config.native) {
     pg = pg.native;
+  } else if (config.ssl?.sslmode) {
+    if (config.ssl.sslrootcert) config.ssl.ca = fs.readFileSync(config.ssl.sslrootcert).toString();
+    if (config.ssl.sslcert) config.ssl.cert = fs.readFileSync(config.ssl.sslcert).toString();
+    if (config.ssl.sslkey) config.ssl.key = fs.readFileSync(config.ssl.sslkey).toString();
   }
   if (!config.database) {
     config.database = 'postgres';
   }
+
   var db = config.db || new pg.Client(config);
-  db.connect(function(err) {
+  db.connect(function (err) {
     if (err) {
       callback(err);
     }
