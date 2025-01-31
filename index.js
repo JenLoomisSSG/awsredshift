@@ -1,13 +1,16 @@
 var util = require('util');
-var pg = require('pg');
+var pg, { Client } = require('pg');
 var semver = require('semver');
 var Base = require('db-migrate-base');
 var Promise = require('bluebird');
 var fs = require('fs');
+const { dependencies } = require('./package-lock.json');
 
 var PgDriver = Base.extend({
   init: function (connection, schema, intern) {
     this.log = intern.mod.log;
+    this.log.info("Initializing PgDriver");
+
     this.type = intern.mod.type;
     this._escapeString = "'";
     this._super(intern);
@@ -763,9 +766,14 @@ var PgDriver = Base.extend({
 Promise.promisifyAll(PgDriver);
 
 exports.connect = function (config, intern, callback) {
+  var log = intern.mod.log;
+  log.verbose('Connecting with custom awsredshift v1.5.2...');
+
   if (config.native) {
+    log.verbose('Using pg native');
     pg = pg.native;
   } else if (config.ssl?.sslmode) {
+    log.verbose('Configuring ssl cert');
     if (config.ssl.sslrootcert) config.ssl.ca = fs.readFileSync(config.ssl.sslrootcert).toString();
     if (config.ssl.sslcert) config.ssl.cert = fs.readFileSync(config.ssl.sslcert).toString();
     if (config.ssl.sslkey) config.ssl.key = fs.readFileSync(config.ssl.sslkey).toString();
@@ -774,8 +782,16 @@ exports.connect = function (config, intern, callback) {
     config.database = 'postgres';
   }
 
-  var db = config.db || new pg.Client(config);
+  log.verbose(`Connecting to database: ${config.database}`);
+
+  var db = new Client(config);
+  log.verbose(`Process version: ${process.version}`);
+  log.verbose(`Requested PG version: ${dependencies.pg.version}`);
+  log.verbose(JSON.stringify(db));
+
   db.connect(function (err) {
+    log.verbose("db.connect callback");
+
     if (err) {
       callback(err);
     }
